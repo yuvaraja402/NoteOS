@@ -7,6 +7,10 @@ Branch pushes, pull requests, and merges to `main` never publish containers,
 apply Terraform, or update ECS. Keep the Terraform resources active in source;
 commenting them out would remove the infrastructure definition, not safely
 disable deployment. Release actions remain disabled/commented instead.
+Both Terraform roots also default to `aws_deployment_enabled=false`. Variable
+validation rejects planning/applying until a release is explicitly unlocked;
+the AWS provider depends on that validation. Do not use conditional resource
+counts as an off switch: they could plan deletion of an existing deployment.
 See [deployment checklist](DEPLOYMENT.md) for the later production promotion.
 
 ## Network and data
@@ -30,7 +34,7 @@ Optional Route 53 latency and geolocation records point to the same ALB.
 Use a different hostname for each policy and certificates covering both.
 [Multi-region plan](MULTI_REGION.md) covers the expansion.
 
-## Runtime SSM parameters
+## Runtime SSM parameters: future release
 
 Create both SecureStrings before planning the regional stack, using the
 customer-managed KMS key provided as `runtime_secrets_kms_key_arn`.
@@ -56,7 +60,7 @@ The signing key establishes device identity. Rotating it without a migration
 plan makes existing anonymous workspaces inaccessible. Redis AUTH rotation
 also needs coordination with API task restarts.
 
-## CI bootstrap
+## CI bootstrap: locked
 
 `terraform/ci-bootstrap/` is an independent root for GitHub OIDC and the CI
 KMS key. An administrator reviews it manually:
@@ -66,7 +70,11 @@ cd infra/terraform/ci-bootstrap
 cp terraform.tfvars.example terraform.tfvars
 # Set OWNER/REPO and reuse the account's existing GitHub OIDC provider if present.
 terraform init
-terraform plan
+terraform validate
+terraform test -filter=tests/deployment_lock.tftest.hcl
+# Future approved bootstrap only, after completing DEPLOYMENT.md:
+# terraform plan -var='aws_deployment_enabled=true' -out=bootstrap.tfplan
+# terraform apply bootstrap.tfplan
 ```
 
 After an approved bootstrap apply, create the Snyk token as an SSM SecureString
@@ -97,14 +105,18 @@ Actions are pinned to commits and the Snyk CLI to a version. Review dependency
 updates regularly. See [GitHub OIDC guidance](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
 and [SSM encryption guidance](https://docs.aws.amazon.com/systems-manager/latest/userguide/secure-string-parameter-kms-encryption.html).
 
-## Regional setup
+## Regional setup: locked
 
 ```bash
 cd infra/terraform
 cp terraform.tfvars.example terraform.tfvars
 # Set image URIs, HTTPS origin, ACM certificate, KMS key, SSM paths, and optional DNS.
 terraform init
-terraform plan
+terraform validate
+terraform test -filter=tests/deployment_lock.tftest.hcl
+# Future approved release only, after completing DEPLOYMENT.md:
+# terraform plan -var='aws_deployment_enabled=true' -out=release.tfplan
+# terraform apply release.tfplan
 ```
 
 For a later approved release, publish reviewed web/API images to ECR before
