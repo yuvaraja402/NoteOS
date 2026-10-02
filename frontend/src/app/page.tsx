@@ -13,26 +13,8 @@ import {
   Tags,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useState, useTransition } from "react";
-
-type Note = {
-  id: string;
-  title: string;
-  content: string;
-  tags: string[];
-  color: string;
-  is_pinned: boolean;
-  created_at: string;
-  updated_at: string;
-};
-
-const starterNote = {
-  title: "Quick capture",
-  content: "Write the first version here. You can tag it, color it, and refine it later.",
-  tags: ["idea"],
-  color: "sea",
-  is_pinned: false,
-};
+import { useMemo, useState } from "react";
+import { useNotes, type Note } from "./use-notes";
 
 const colorOptions = [
   { value: "sea", label: "Sea" },
@@ -57,54 +39,10 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`API request failed with ${response.status}`);
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json();
-}
-
 export default function Home() {
-  const [notes, setNotes] = useState<Note[]>([]);
+  const { notes, status, error, isPending, createNote: addNote, updateNote: editNote, deleteNote: removeNote } = useNotes();
   const [activeId, setActiveId] = useState("");
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("Connecting to NotesOS API");
-  const [error, setError] = useState("");
-  const [isPending, startTransition] = useTransition();
-
-  useEffect(() => {
-    let alive = true;
-
-    request<Note[]>("/notes")
-      .then((items) => {
-        if (!alive) return;
-        setNotes(items);
-        setActiveId(items[0]?.id ?? "");
-        setStatus("Data synced");
-      })
-      .catch(() => {
-        if (!alive) return;
-        setError("Start the API on port 8000 to enable live CRUD.");
-        setStatus("Offline");
-      });
-
-    return () => {
-      alive = false;
-    };
-  }, []);
 
   const filteredNotes = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -126,72 +64,18 @@ export default function Home() {
   const activeNote =
     notes.find((note) => note.id === activeId) ?? filteredNotes[0] ?? null;
 
-  function replaceNote(nextNote: Note) {
-    setNotes((current) =>
-      current.map((note) => (note.id === nextNote.id ? nextNote : note)),
-    );
-  }
-
   function createNote() {
-    startTransition(async () => {
-      try {
-        const created = await request<Note>("/notes", {
-          method: "POST",
-          body: JSON.stringify(starterNote),
-        });
-        setNotes((current) => [created, ...current]);
-        setActiveId(created.id);
-        setStatus("New note created");
-        setError("");
-      } catch {
-        setError("Could not create the note. Check the API logs.");
-      }
-    });
+    setActiveId(addNote());
   }
 
   function updateNote(patch: Partial<Note>) {
-    if (!activeNote) return;
-    const optimistic = {
-      ...activeNote,
-      ...patch,
-      updated_at: new Date().toISOString(),
-    };
-    replaceNote(optimistic);
-    setStatus("Saving");
-
-    startTransition(async () => {
-      try {
-        const saved = await request<Note>(`/notes/${activeNote.id}`, {
-          method: "PATCH",
-          body: JSON.stringify(patch),
-        });
-        replaceNote(saved);
-        setStatus("Saved");
-        setError("");
-      } catch {
-        setError("Save failed. The local view kept your latest edit.");
-        setStatus("Needs retry");
-      }
-    });
+    if (activeNote) editNote(activeNote.id, patch);
   }
 
   function deleteNote() {
     if (!activeNote) return;
-
-    startTransition(async () => {
-      try {
-        await request<void>(`/notes/${activeNote.id}`, { method: "DELETE" });
-        setNotes((current) =>
-          current.filter((note) => note.id !== activeNote.id),
-        );
-        setActiveId(
-          filteredNotes.find((note) => note.id !== activeNote.id)?.id ?? "",
-        );
-        setStatus("Note deleted");
-      } catch {
-        setError("Delete failed. Check the API logs.");
-      }
-    });
+    removeNote(activeNote.id);
+    setActiveId(filteredNotes.find((item) => item.id !== activeNote.id)?.id ?? "");
   }
 
   return (
@@ -262,6 +146,7 @@ export default function Home() {
                     className="title-input"
                     aria-label="Note title"
                     value={activeNote.title}
+                    maxLength={160}
                     onChange={(event) =>
                       updateNote({ title: event.target.value })
                     }
@@ -328,6 +213,7 @@ export default function Home() {
                 className="content-input"
                 aria-label="Note content"
                 value={activeNote.content}
+                maxLength={20000}
                 onChange={(event) => updateNote({ content: event.target.value })}
               />
 
@@ -346,7 +232,7 @@ export default function Home() {
             <div className="empty-state">
               <Sparkles size={26} />
               <h2>No notes yet</h2>
-              <p>Create the first note once the API is running.</p>
+              <p>Capture a thought. This tab keeps your drafts while cloud sync connects.</p>
               <button className="primary-action" onClick={createNote}>
                 <Plus size={18} />
                 New note

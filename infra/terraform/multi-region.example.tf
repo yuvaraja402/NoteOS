@@ -3,7 +3,7 @@
 #
 # The intended North America, Europe, and Asia rollout is two AWS regions per
 # continent. Each region should run the same three-tier stack: ALB, ECS/Fargate,
-# RDS/Aurora, ECR, SSM, KMS, and CloudWatch.
+# DynamoDB, ElastiCache, ECR, SSM, KMS, and CloudWatch.
 #
 # provider "aws" {
 #   alias  = "north_america_east"

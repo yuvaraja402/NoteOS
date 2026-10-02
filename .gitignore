@@ -10,13 +10,12 @@ dist/
 *.log
 coverage/
 backend/.venv/
-backend/noteos.db
+*.db
 __pycache__/
 *.pyc
 .terraform/
 *.tfstate
 *.tfstate.*
-backend/alembic/__pycache__/
 *.tsbuildinfo
 *.tfvars
 *.tfvars.json

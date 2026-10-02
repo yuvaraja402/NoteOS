@@ -1,5 +1,9 @@
+data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
+
 locals {
-  name = var.project_name
+  name                  = var.project_name
+  session_parameter_arn = "arn:${data.aws_partition.current.partition}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.session_signing_key_ssm_parameter_name}"
   tags = {
     Project   = var.project_name
     ManagedBy = "terraform"
@@ -136,12 +140,19 @@ resource "aws_route_table_association" "data" {
 
 resource "aws_security_group" "alb" {
   name        = "${local.name}-alb"
-  description = "Public HTTP access"
+  description = "Public HTTPS and HTTP redirect"
   vpc_id      = aws_vpc.main.id
 
   ingress {
     from_port   = 80
     to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -194,14 +205,14 @@ resource "aws_security_group" "api_tasks" {
   }
 }
 
-resource "aws_security_group" "db" {
-  name        = "${local.name}-db"
-  description = "RDS access from ECS tasks"
+resource "aws_security_group" "redis" {
+  name        = "${local.name}-redis"
+  description = "TLS Redis access from API tasks"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port       = 5432
-    to_port         = 5432
+    from_port       = 6379
+    to_port         = 6379
     protocol        = "tcp"
     security_groups = [aws_security_group.api_tasks.id]
   }
@@ -225,56 +236,106 @@ resource "aws_ecr_repository" "api" {
   }
 }
 
-resource "aws_db_subnet_group" "main" {
-  name       = "${local.name}-db-subnets"
-  subnet_ids = aws_subnet.data[*].id
+resource "aws_dynamodb_table" "notes" {
+  name                        = "${local.name}-${var.environment}-notes"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "workspace_id"
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "workspace_id"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = local.tags
 }
 
-data "aws_ssm_parameter" "db_password" {
-  name            = var.db_password_ssm_parameter_name
+resource "aws_vpc_endpoint" "dynamodb" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.region}.dynamodb"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = aws_route_table.private[*].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DescribeTable"]
+      Resource  = aws_dynamodb_table.notes.arn
+      Condition = {
+        StringEquals = { "aws:PrincipalArn" = aws_iam_role.task.arn }
+      }
+    }]
+  })
+}
+
+data "aws_ssm_parameter" "redis_auth" {
+  name            = var.redis_auth_token_ssm_parameter_name
   with_decryption = true
 
   lifecycle {
     postcondition {
       condition     = self.type == "SecureString"
-      error_message = "The RDS password must be stored as an SSM SecureString."
+      error_message = "The Redis AUTH token must be stored as an SSM SecureString."
     }
   }
 }
 
-resource "aws_db_instance" "main" {
-  identifier             = "${local.name}-postgres"
-  allocated_storage      = 20
-  engine                 = "postgres"
-  engine_version         = "16.4"
-  instance_class         = "db.t4g.micro"
-  db_name                = var.db_name
-  username               = var.db_username
-  password               = data.aws_ssm_parameter.db_password.value
-  db_subnet_group_name   = aws_db_subnet_group.main.name
-  vpc_security_group_ids = [aws_security_group.db.id]
-  publicly_accessible    = false
-  storage_encrypted      = true
-  deletion_protection    = true
-  skip_final_snapshot    = true
-}
-
-resource "aws_kms_key" "ssm" {
-  description             = "KMS key for NotesOS SSM SecureString parameters"
-  deletion_window_in_days = 7
+resource "aws_kms_key" "redis" {
+  description             = "Encryption of NotesOS Redis data and snapshots"
+  deletion_window_in_days = 30
   enable_key_rotation     = true
 }
 
-resource "aws_kms_alias" "ssm" {
-  name          = "alias/${local.name}-ssm"
-  target_key_id = aws_kms_key.ssm.key_id
+resource "aws_kms_alias" "redis" {
+  name          = "alias/${local.name}-redis"
+  target_key_id = aws_kms_key.redis.key_id
 }
 
-resource "aws_ssm_parameter" "database_url" {
-  name   = "/${local.name}/${var.environment}/database/url"
-  type   = "SecureString"
-  key_id = aws_kms_key.ssm.arn
-  value  = "postgresql+psycopg2://${urlencode(var.db_username)}:${replace(urlencode(data.aws_ssm_parameter.db_password.value), "+", "%20")}@${aws_db_instance.main.address}:5432/${var.db_name}?sslmode=require"
+resource "aws_elasticache_subnet_group" "redis" {
+  name       = "${local.name}-redis-subnets"
+  subnet_ids = aws_subnet.data[*].id
+}
+
+resource "aws_elasticache_parameter_group" "redis" {
+  name   = "${local.name}-redis"
+  family = "redis7"
+
+  parameter {
+    name  = "maxmemory-policy"
+    value = "noeviction"
+  }
+}
+
+resource "aws_elasticache_replication_group" "notes" {
+  replication_group_id       = "${local.name}-${var.environment}-buffer"
+  description                = "Redis write buffer before DynamoDB persistence"
+  engine                     = "redis"
+  engine_version             = "7.1"
+  node_type                  = var.redis_node_type
+  num_cache_clusters         = 2
+  automatic_failover_enabled = true
+  multi_az_enabled           = true
+  subnet_group_name          = aws_elasticache_subnet_group.redis.name
+  parameter_group_name       = aws_elasticache_parameter_group.redis.name
+  security_group_ids         = [aws_security_group.redis.id]
+  port                       = 6379
+  at_rest_encryption_enabled = true
+  kms_key_id                 = aws_kms_key.redis.arn
+  transit_encryption_enabled = true
+  auth_token                 = data.aws_ssm_parameter.redis_auth.value
+  auth_token_update_strategy = "SET"
+  snapshot_retention_limit   = 7
+  apply_immediately          = false
+  tags                       = local.tags
 }
 
 resource "aws_ecs_cluster" "main" {
@@ -331,20 +392,34 @@ resource "aws_iam_role_policy" "task_ssm" {
       {
         Action   = "ssm:GetParameter"
         Effect   = "Allow"
-        Resource = aws_ssm_parameter.database_url.arn
+        Resource = [data.aws_ssm_parameter.redis_auth.arn, local.session_parameter_arn]
       },
       {
         Action   = "kms:Decrypt"
         Effect   = "Allow"
-        Resource = aws_kms_key.ssm.arn
+        Resource = var.runtime_secrets_kms_key_arn
         Condition = {
           StringEquals = {
             "kms:ViaService"                      = "ssm.${var.region}.amazonaws.com"
-            "kms:EncryptionContext:PARAMETER_ARN" = aws_ssm_parameter.database_url.arn
+            "kms:EncryptionContext:PARAMETER_ARN" = [data.aws_ssm_parameter.redis_auth.arn, local.session_parameter_arn]
           }
         }
       }
     ]
+  })
+}
+
+resource "aws_iam_role_policy" "task_dynamodb" {
+  name = "${local.name}-dynamodb"
+  role = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DescribeTable"]
+      Resource = aws_dynamodb_table.notes.arn
+    }]
   })
 }
 
@@ -375,8 +450,13 @@ resource "aws_ecs_task_definition" "api" {
       environment = [
         { name = "NOTEOS_ENV", value = var.environment },
         { name = "AWS_REGION", value = var.region },
-        { name = "CORS_ORIGINS", value = var.allowed_origin },
-        { name = "NOTEOS_DATABASE_URL_SSM_PARAM", value = aws_ssm_parameter.database_url.name }
+        { name = "CORS_ORIGINS", value = join(",", compact([var.allowed_origin, var.geo_domain_name != "" ? "https://${var.geo_domain_name}" : ""])) },
+        { name = "DYNAMODB_TABLE_NAME", value = aws_dynamodb_table.notes.name },
+        { name = "REDIS_HOST", value = aws_elasticache_replication_group.notes.primary_endpoint_address },
+        { name = "REDIS_AUTH_TOKEN_SSM_PARAM", value = var.redis_auth_token_ssm_parameter_name },
+        { name = "SESSION_SIGNING_KEY_SSM_PARAM", value = var.session_signing_key_ssm_parameter_name },
+        { name = "FLUSH_IDLE_SECONDS", value = tostring(var.flush_idle_seconds) },
+        { name = "FLUSH_MAX_SECONDS", value = tostring(var.flush_max_seconds) }
       ]
       healthCheck = {
         command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""]
@@ -421,7 +501,7 @@ resource "aws_ecs_task_definition" "web" {
         protocol      = "tcp"
       }]
       environment = [
-        { name = "API_INTERNAL_URL", value = "http://${aws_lb.main.dns_name}/api" },
+        { name = "API_INTERNAL_URL", value = "${var.allowed_origin}/api" },
         { name = "PORT", value = "3050" },
         { name = "HOSTNAME", value = "0.0.0.0" }
       ]
@@ -477,13 +557,30 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+  certificate_arn   = var.acm_certificate_arn
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+
+  default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.web.arn
   }
 }
 
 resource "aws_lb_listener_rule" "api" {
-  listener_arn = aws_lb_listener.http.arn
+  listener_arn = aws_lb_listener.https.arn
   priority     = 10
 
   action {
@@ -517,7 +614,7 @@ resource "aws_ecs_service" "web" {
     container_port   = 3050
   }
 
-  depends_on = [aws_lb_listener.http]
+  depends_on = [aws_lb_listener.https]
 }
 
 resource "aws_ecs_service" "api" {
@@ -539,7 +636,7 @@ resource "aws_ecs_service" "api" {
     container_port   = 8000
   }
 
-  depends_on = [aws_lb_listener_rule.api]
+  depends_on = [aws_lb_listener_rule.api, aws_vpc_endpoint.dynamodb, aws_iam_role_policy.task_dynamodb, aws_iam_role_policy.task_ssm]
 }
 
 resource "aws_route53_record" "latency" {

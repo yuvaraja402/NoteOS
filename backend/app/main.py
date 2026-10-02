@@ -1,134 +1,183 @@
-from random import sample
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
+from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from redis import Redis
+from redis.exceptions import RedisError
 
-from app.config import get_settings
-from app.database import get_db
-from app.models import Note, utc_now
-from app.schemas import NoteCreate, NoteRead, NoteUpdate
+from app.config import Settings, get_settings
+from app.identity import COOKIE_MAX_AGE, COOKIE_NAME, device_identity, digest
+from app.schemas import NoteBase, NoteCreate, NoteRead, NoteUpdate
+from app.secrets import read_secret
+from app.store import BusyWorkspace, NoteStore
 
-settings = get_settings()
-app = FastAPI(title=settings.app_name)
+logger = logging.getLogger(__name__)
 
+
+async def flush_loop(store, interval):
+    while True:
+        try:
+            await asyncio.to_thread(store.flush_due_workspaces)
+        except Exception:
+            logger.error("Cloud flush worker failed; pending writes remain queued")
+        await asyncio.sleep(interval)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    settings = get_settings()
+    auth_token = read_secret(settings.redis_auth_ssm_param, settings.aws_region)
+    session_key = read_secret(settings.session_key_ssm_param, settings.aws_region)
+    if len(session_key.encode()) < 32:
+        raise RuntimeError("The session signing key must contain at least 32 bytes.")
+    redis_client = Redis(
+        host=settings.redis_host, port=settings.redis_port, password=auth_token,
+        ssl=True, ssl_cert_reqs="required", decode_responses=True,
+        socket_connect_timeout=5, socket_timeout=5,
+    )
+    redis_client.ping()
+    table = boto3.resource(
+        "dynamodb", region_name=settings.aws_region,
+        config=Config(connect_timeout=5, read_timeout=5, retries={"max_attempts": 2}),
+    ).Table(settings.table_name)
+    table.load()
+    app.state.settings = settings
+    app.state.session_key = session_key
+    app.state.store = NoteStore(redis_client, table, settings)
+    worker = asyncio.create_task(flush_loop(app.state.store, settings.flush_poll_seconds))
+    try:
+        yield
+    finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+        redis_client.close()
+
+
+app = FastAPI(title="NotesOS API", lifespan=lifespan)
+# Reading origins does not require cloud access; resource validation happens at startup.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=Settings().cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Content-Type"],
 )
 
 
-def serialize(note: Note) -> NoteRead:
-    return NoteRead(
-        id=note.id,
-        title=note.title,
-        content=note.content,
-        tags=[tag for tag in note.tags.split(",") if tag],
-        color=note.color,
-        is_pinned=note.is_pinned,
-        created_at=note.created_at,
-        updated_at=note.updated_at,
-    )
+@app.middleware("http")
+async def storage_errors(request, call_next):
+    try:
+        response = await call_next(request)
+    except (RedisError, BotoCoreError, ClientError, BusyWorkspace):
+        from fastapi.responses import JSONResponse
+        response = JSONResponse(
+            {"detail": "Cloud storage is temporarily unavailable. Keep your browser drafts."},
+            status_code=503,
+        )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
-def apply_note(note: Note, payload: NoteCreate | NoteUpdate) -> Note:
-    data = payload.model_dump(exclude_unset=True)
-    for field, value in data.items():
-        if field == "tags":
-            setattr(note, field, ",".join(value))
-        else:
-            setattr(note, field, value)
-    note.updated_at = utc_now()
-    return note
+def workspace(request: Request, response: Response):
+    settings = request.app.state.settings
+    secret = request.app.state.session_key
+    store = request.app.state.store
+    # Only the trusted ALB can reach deployed tasks. ALB appends the actual client IP.
+    address = request.client.host if request.client else "unknown"
+    if settings.is_production_like:
+        address = request.headers.get("x-forwarded-for", address).split(",")[-1].strip()
+    ip_identity = digest(secret, "ip", address)
+    if not store.rate_limit(ip_identity, 1200):
+        raise HTTPException(429, "Too many requests. Try again shortly.")
+    identity, token, new_cookie = device_identity(request.cookies.get(COOKIE_NAME), secret)
+    if not store.rate_limit(identity, 240):
+        raise HTTPException(429, "Too many requests. Try again shortly.")
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("origin")
+        if origin and origin not in settings.cors_origins:
+            raise HTTPException(403, "Origin is not allowed.")
+    if new_cookie:
+        response.set_cookie(
+            COOKIE_NAME, token, httponly=True, secure=settings.is_production_like,
+            samesite="lax", max_age=COOKIE_MAX_AGE, path="/",
+        )
+    return identity
+
+
+def store(request: Request):
+    return request.app.state.store
 
 
 @app.get("/health")
 @app.get("/api/health")
-def health() -> dict[str, str]:
+def health(request: Request):
+    request.app.state.store.redis.ping()
     return {"status": "ok", "service": "noteos-api"}
+
+
+@app.get("/workspace")
+@app.get("/api/workspace")
+def get_workspace(identity=Depends(workspace), repository=Depends(store)):
+    document = repository.snapshot(identity)
+    return {
+        "workspace_id": identity,
+        "notes": document["notes"],
+        "status": "buffered" if document["dirty"] else "persisted",
+        "flush_due_at": document["due_at"],
+        "persisted_at": document["persisted_at"],
+        "revision": document["revision"],
+        "persisted_revision": document["persisted_revision"],
+        "is_new": document["revision"] == 0,
+    }
 
 
 @app.get("/notes", response_model=list[NoteRead])
 @app.get("/api/notes", response_model=list[NoteRead])
-def list_notes(db: Session = Depends(get_db)) -> list[NoteRead]:
-    notes = db.scalars(select(Note).order_by(Note.updated_at.desc())).all()
-    if notes:
-        return [serialize(note) for note in notes]
-
-    seed_pool = [
-        Note(
-            title="Shopping list",
-            content="- coffee beans\n- oat milk\n- fresh fruit\n- dinner ingredients",
-            tags="personal,errands",
-            color="citrus",
-        ),
-        Note(
-            title="Project strategy",
-            content="Focus\n- Make the first workflow feel instant\n- Keep the interface calm\n- Review progress every Friday",
-            tags="strategy,work",
-            color="sea",
-            is_pinned=True,
-        ),
-        Note(
-            title="Roadmap ideas",
-            content="Next\n- Better search\n- Shared note links\n- Weekly planning view",
-            tags="roadmap,product",
-            color="sky",
-            is_pinned=True,
-        ),
-        Note(
-            title="Reading queue",
-            content="- Design systems notes\n- Product onboarding examples\n- Team operating cadence",
-            tags="learning",
-            color="coral",
-        ),
-        Note(
-            title="Weekend plan",
-            content="- Long walk\n- Clean desk\n- Prep meals\n- Call home",
-            tags="personal",
-            color="sea",
-        ),
-    ]
-    seed = sample(seed_pool, k=3)
-    db.add_all(seed)
-    db.commit()
-    return [serialize(note) for note in seed]
+def list_notes(identity=Depends(workspace), repository=Depends(store)):
+    return repository.snapshot(identity)["notes"]
 
 
-@app.post("/notes", response_model=NoteRead, status_code=status.HTTP_201_CREATED)
-@app.post("/api/notes", response_model=NoteRead, status_code=status.HTTP_201_CREATED)
-def create_note(payload: NoteCreate, db: Session = Depends(get_db)) -> NoteRead:
-    note = apply_note(Note(), payload)
-    db.add(note)
-    db.commit()
-    db.refresh(note)
-    return serialize(note)
+def save(repository, identity, note_id, payload, response, patch=False):
+    try:
+        note, revision = repository.save_note(identity, str(note_id), payload, patch=patch)
+        response.headers["X-NoteOS-Revision"] = str(revision)
+        return note
+    except KeyError:
+        raise HTTPException(404, "Note not found") from None
+    except ValueError as error:
+        raise HTTPException(413, str(error)) from None
+
+
+@app.post("/notes", response_model=NoteRead, status_code=201)
+@app.post("/api/notes", response_model=NoteRead, status_code=201)
+def create_note(payload: NoteCreate, response: Response, identity=Depends(workspace), repository=Depends(store)):
+    return save(repository, identity, uuid4(), payload.model_dump(), response)
+
+
+@app.put("/notes/{note_id}", response_model=NoteRead)
+@app.put("/api/notes/{note_id}", response_model=NoteRead)
+def put_note(note_id: UUID, payload: NoteBase, response: Response, identity=Depends(workspace), repository=Depends(store)):
+    # Client-generated UUIDs make replaying the browser outbox idempotent.
+    return save(repository, identity, note_id, payload.model_dump(), response)
 
 
 @app.patch("/notes/{note_id}", response_model=NoteRead)
 @app.patch("/api/notes/{note_id}", response_model=NoteRead)
-def update_note(note_id: str, payload: NoteUpdate, db: Session = Depends(get_db)) -> NoteRead:
-    note = db.get(Note, note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-
-    apply_note(note, payload)
-    db.commit()
-    db.refresh(note)
-    return serialize(note)
+def update_note(note_id: UUID, payload: NoteUpdate, response: Response, identity=Depends(workspace), repository=Depends(store)):
+    return save(repository, identity, note_id, payload.model_dump(exclude_unset=True, exclude_none=True), response, patch=True)
 
 
-@app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
-@app.delete("/api/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_note(note_id: str, db: Session = Depends(get_db)) -> Response:
-    note = db.get(Note, note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-
-    db.delete(note)
-    db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/notes/{note_id}", status_code=204)
+@app.delete("/api/notes/{note_id}", status_code=204)
+def delete_note(note_id: UUID, response: Response, identity=Depends(workspace), repository=Depends(store)):
+    _, revision = repository.delete_note(identity, str(note_id))
+    response.headers["X-NoteOS-Revision"] = str(revision)
+    response.status_code = 204
+    return response

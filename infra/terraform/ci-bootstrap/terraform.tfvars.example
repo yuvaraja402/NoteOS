@@ -1,3 +1,5 @@
+# Manual bootstrap reference only; CI never applies these resources.
+# Keep the SSM reader trusted to main, not feature branches or pull requests.
 github_repository             = "YOUR-OWNER/noteOS"
 region                        = "ca-central-1"
 github_branch                 = "main"
