@@ -1,65 +1,46 @@
 import os
 import unittest
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.config import Settings
-from app.secrets import get_database_url
+from app.secrets import read_secret
 
 
-class RuntimeSecretTests(unittest.TestCase):
-    def settings(self, production=True, parameter="/noteos/production/database/url"):
-        return SimpleNamespace(
-            is_production_like=production,
-            database_url_ssm_param=parameter,
-            database_url="sqlite:///./noteos.db",
-            aws_region="ca-central-1",
-        )
-
-    def test_runtime_uses_ssm_decryption_in_configured_region(self):
+class SecretTests(unittest.TestCase):
+    def test_ssm_requires_secure_string_and_decryption(self):
         client = Mock()
-        url = "postgresql+psycopg2://user:encoded%25password@db:5432/noteos"
-        client.get_parameter.return_value = {
-            "Parameter": {"Type": "SecureString", "Value": url}
-        }
-        with patch("app.secrets.get_settings", return_value=self.settings()):
-            with patch("app.secrets.boto3.client", return_value=client) as factory:
-                self.assertEqual(get_database_url(), url)
+        client.get_parameter.return_value = {"Parameter": {"Type": "SecureString", "Value": "test-value"}}
+        with patch("app.secrets.boto3.client", return_value=client) as factory:
+            self.assertEqual(read_secret("/noteos/production/session/key", "ca-central-1"), "test-value")
         factory.assert_called_once_with("ssm", region_name="ca-central-1")
-        client.get_parameter.assert_called_once_with(
-            Name="/noteos/production/database/url", WithDecryption=True
-        )
+        client.get_parameter.assert_called_once_with(Name="/noteos/production/session/key", WithDecryption=True)
 
-    def test_runtime_rejects_plaintext_or_non_postgres_ssm_values(self):
-        for parameter in (
-            {"Type": "String", "Value": "postgresql://user:pass@db/noteos"},
-            {"Type": "SecureString", "Value": "sqlite:///noteos.db"},
-        ):
+    def test_empty_or_plaintext_secret_is_rejected(self):
+        for kind, value in (("String", "value"), ("SecureString", "")):
             client = Mock()
-            client.get_parameter.return_value = {"Parameter": parameter}
-            with patch("app.secrets.get_settings", return_value=self.settings()):
-                with patch("app.secrets.boto3.client", return_value=client):
-                    with self.assertRaises(RuntimeError):
-                        get_database_url()
+            client.get_parameter.return_value = {"Parameter": {"Type": kind, "Value": value}}
+            with patch("app.secrets.boto3.client", return_value=client), self.assertRaises(RuntimeError):
+                read_secret("/noteos/production/session/key", "ca-central-1")
 
-    def test_local_development_needs_no_aws_access(self):
-        with patch("app.secrets.get_settings", return_value=self.settings(False, "")):
-            with patch("app.secrets.boto3.client") as factory:
-                self.assertEqual(get_database_url(), "sqlite:///./noteos.db")
-        factory.assert_not_called()
+    def test_backend_has_no_local_database_fallback(self):
+        with patch.dict(os.environ, {"DYNAMODB_TABLE_NAME": "", "REDIS_HOST": ""}):
+            with self.assertRaises(RuntimeError):
+                Settings().validate()
 
-    def test_deployed_configuration_requires_ssm_and_rejects_raw_url(self):
-        settings = Settings()
-        settings.environment = "production"
-        settings.database_url_ssm_param = ""
-        with self.assertRaises(RuntimeError):
+    def test_cloud_configuration_and_time_limits(self):
+        with patch.dict(os.environ, {
+            "NOTEOS_ENV": "production", "DYNAMODB_TABLE_NAME": "notes",
+            "REDIS_HOST": "cache.example.com",
+            "REDIS_AUTH_TOKEN_SSM_PARAM": "/noteos/production/redis/auth",
+            "SESSION_SIGNING_KEY_SSM_PARAM": "/noteos/production/session/key",
+        }):
+            settings = Settings()
             settings.validate()
-        settings.database_url_ssm_param = "/noteos/production/database/url"
-        with patch.dict(os.environ, {"NOTEOS_DATABASE_URL": "postgresql://user:pass@db/noteos"}):
+            settings.flush_max_seconds = 10
             with self.assertRaises(RuntimeError):
                 settings.validate()
 
-    def test_invalid_environment_cannot_bypass_guardrails(self):
+    def test_environment_typo_cannot_bypass_validation(self):
         settings = Settings()
         settings.environment = "prodution"
         with self.assertRaises(RuntimeError):

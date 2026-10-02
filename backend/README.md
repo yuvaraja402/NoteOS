@@ -1,62 +1,93 @@
 # Backend
 
-FastAPI service for note CRUD. Docker Compose uses Postgres; direct local
-development can use SQLite. AWS uses RDS and SSM.
+FastAPI for anonymous, device-scoped notes. Redis buffers edits and a worker
+persists workspace documents to DynamoDB. No ORM, SQL migrations, or local
+database fallback is included.
 
-## Run locally
+CI is validation-only. Tests and container builds do not provision AWS
+or deploy the API. See the [release checklist](../infra/DEPLOYMENT.md) before
+connecting to production resources; the AWS-backed runtime below is opt-in.
+
+## Tests
 
 From this directory:
 
 ```bash
-cp .env.example .env
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-set -a
-source .env
-set +a
-alembic upgrade head
-uvicorn app.main:app --reload --port 8000
-```
-
-`NOTEOS_ENV=local` allows `NOTEOS_DATABASE_URL`, defaulting to SQLite.
-Docker Compose supplies its own local Postgres URL and runs migrations.
-
-```bash
+pip install -r requirements-test.txt
 python -m unittest discover -s tests
 ```
 
-Build from the repository root:
+Tests inject service doubles at the AWS boundary. They do not create cloud
+resources or start local database servers.
+
+## Dependencies
+
+`requirements.in` lists direct dependencies. `requirements.txt` locks their
+transitive dependencies and download hashes. After changing the input, use
+[uv](https://docs.astral.sh/uv/pip/compile/) to regenerate the lock:
 
 ```bash
-docker build -t noteos-api ./backend
+uv pip compile --python-version 3.13 --universal --generate-hashes --output-file requirements.txt requirements.in
+uv pip compile --python-version 3.13 --universal --generate-hashes --constraint requirements.txt --output-file requirements-test.txt requirements-test.in
 ```
 
-## Deployed configuration
+Run the tests and image scans after an update. Container builds download only
+verified wheels; the runtime image excludes package installers and compilers.
+
+## Run with AWS
+
+The frontend preview works on its own. Start the API only after the AWS resources
+and SSM parameters are available and you have private network access to the
+Redis endpoint (VPN, a development host in the VPC, or an equivalent approved path).
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+# Set the Redis host and table name. Use your existing AWS profile.
+set -a
+source .env
+set +a
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+```
+
+TLS verification is always enabled for Redis. ECS uses its task role; direct
+development uses the AWS credential chain. Secret values are read from SSM,
+never passed in plaintext environment variables.
 
 | Variable | Purpose |
 | --- | --- |
-| `NOTEOS_ENV` | `staging` or `production` |
-| `AWS_REGION` | SSM region; defaults to `ca-central-1` |
-| `CORS_ORIGINS` | Comma-separated browser origins |
-| `NOTEOS_DATABASE_URL_SSM_PARAM` | SSM SecureString path, e.g. `/noteos/production/database/url` |
-| `RUN_MIGRATIONS` | Container startup migration switch; default `false` |
+| `NOTEOS_ENV` | `local`, `staging`, or `production`; controls cookie/CORS rules |
+| `AWS_REGION` | Region, default `ca-central-1` |
+| `DYNAMODB_TABLE_NAME` | Notes document table |
+| `REDIS_HOST`, `REDIS_PORT` | Private ElastiCache primary endpoint and port |
+| `REDIS_AUTH_TOKEN_SSM_PARAM` | Redis AUTH SecureString path |
+| `SESSION_SIGNING_KEY_SSM_PARAM` | Device-cookie HMAC SecureString path |
+| `CORS_ORIGINS` | Explicit allowed browser origins |
+| `FLUSH_IDLE_SECONDS` | Idle write delay, default `60` |
+| `FLUSH_MAX_SECONDS` | Maximum buffer window, default `300` |
+| `FLUSH_POLL_SECONDS` | Worker polling interval, default `5` |
+| `CACHE_TTL_SECONDS` | Clean workspace cache retention, default `86400` |
 
-The API reads and decrypts the database URL through boto3 using its ECS task
-role. Staging/production require SSM, reject raw `NOTEOS_DATABASE_URL`, reject
-wildcard CORS, and reject non-Postgres SSM values. Unknown environment names
-fail validation. The frontend has no access to these secrets.
+The signing key must have at least 32 bytes of random material. Rotating it
+invalidates existing anonymous identities; keep it stable until a migration
+strategy exists. Restart API tasks after changing runtime SSM secrets.
 
-Secrets are resolved at process startup. After changing an SSM database URL,
-restart API tasks. Coordinate password rotation with RDS and migrations; SSM
-does not automatically rotate RDS credentials.
+## API
 
-## Endpoints and migrations
+All endpoints also accept the `/api` prefix for ALB routing:
 
-`GET /health`, `GET /notes`, `POST /notes`,
-`PATCH /notes/{id}`, and `DELETE /notes/{id}`.
-All routes also accept the `/api` prefix for ALB path routing.
+- `GET /workspace`: notes, anonymous workspace identifier, buffered/persisted revisions.
+- `GET /notes`: device-scoped note list.
+- `PUT /notes/{uuid}`: idempotent create or replacement, used by the browser outbox.
+- `POST /notes`: server-generated note ID.
+- `PATCH /notes/{uuid}`: partial update.
+- `DELETE /notes/{uuid}`: idempotent deletion.
+- `GET /health`: runtime Redis connection health.
 
-Schema revisions live in `alembic/versions/`. Run `alembic upgrade head` as
-a one-off release task before starting a new API version. Deployed ECS tasks
-do not run migrations concurrently on startup. See [infrastructure setup](../infra/README.md).
+Writes return `X-NoteOS-Revision`. The client keeps drafts until the workspace's
+persisted revision reaches that value. All note access is scoped by a signed
+cookie; clients cannot choose a workspace ID. See [storage design](../infra/STORAGE.md).
+
+Build from the repository root: `docker build -t noteos-api ./backend`.

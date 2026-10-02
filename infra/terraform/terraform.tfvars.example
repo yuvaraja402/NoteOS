@@ -1,15 +1,24 @@
+# Reference inputs only. Branch CI validates without applying this stack.
+# Configure and review a production release using ../DEPLOYMENT.md first.
 project_name = "noteos"
 region       = "ca-central-1"
 environment  = "production"
-db_name      = "noteos"
-db_username  = "noteos"
-db_password_ssm_parameter_name = "/noteos/production/database/password"
-web_image    = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/noteos-web:latest"
-api_image    = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/noteos-api:latest"
-allowed_origin = "https://notes.example.com"
 
-# Optional Route 53 records. Leave blank for no DNS record.
-route53_zone_id      = ""
-app_domain_name      = ""
-geo_domain_name      = ""
+# Create both SecureStrings using this customer-managed KMS key before planning.
+redis_auth_token_ssm_parameter_name  = "/noteos/production/redis/auth-token"
+session_signing_key_ssm_parameter_name = "/noteos/production/session/signing-key"
+runtime_secrets_kms_key_arn = "arn:aws:kms:ca-central-1:123456789012:key/REPLACE-WITH-KEY-ID"
+
+web_image      = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/noteos-web:COMMIT-SHA"
+api_image      = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/noteos-api:COMMIT-SHA"
+allowed_origin = "https://notes.example.com"
+acm_certificate_arn = "arn:aws:acm:ca-central-1:123456789012:certificate/REPLACE-WITH-CERTIFICATE-ID"
+redis_node_type = "cache.t4g.small"
+flush_idle_seconds = 60
+flush_max_seconds = 300
+
+# Optional Route 53 records; use a different hostname for each routing policy.
+route53_zone_id = ""
+app_domain_name = ""
+geo_domain_name = ""
 route53_continent_code = "NA"

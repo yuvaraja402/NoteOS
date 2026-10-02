@@ -21,7 +21,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3050
 ENV HOSTNAME=0.0.0.0
 
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+# The standalone server needs Node, not package managers or their dependencies.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-* \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/yarn /usr/local/bin/yarnpkg /usr/local/bin/corepack \
+    && addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./

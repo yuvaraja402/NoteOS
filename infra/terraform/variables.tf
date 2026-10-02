@@ -19,23 +19,53 @@ variable "environment" {
   }
 }
 
-variable "db_name" {
-  type    = string
-  default = "noteos"
-}
-
-variable "db_username" {
-  type    = string
-  default = "noteos"
-}
-
-variable "db_password_ssm_parameter_name" {
+variable "redis_auth_token_ssm_parameter_name" {
   type        = string
-  description = "Existing SSM SecureString containing the RDS password. Create it before planning this stack."
+  description = "Existing SSM SecureString containing the Redis AUTH token."
 
   validation {
-    condition     = startswith(var.db_password_ssm_parameter_name, "/")
-    error_message = "Use an absolute SSM parameter path, such as /noteos/production/database/password."
+    condition     = startswith(var.redis_auth_token_ssm_parameter_name, "/")
+    error_message = "Use an absolute SSM parameter path."
+  }
+}
+
+variable "session_signing_key_ssm_parameter_name" {
+  type        = string
+  description = "Existing SSM SecureString containing the anonymous-session HMAC key."
+
+  validation {
+    condition     = startswith(var.session_signing_key_ssm_parameter_name, "/")
+    error_message = "Use an absolute SSM parameter path."
+  }
+}
+
+variable "runtime_secrets_kms_key_arn" {
+  type        = string
+  description = "Customer-managed KMS key used to encrypt both runtime SSM secrets."
+}
+
+variable "redis_node_type" {
+  type    = string
+  default = "cache.t4g.small"
+}
+
+variable "flush_idle_seconds" {
+  type    = number
+  default = 60
+
+  validation {
+    condition     = var.flush_idle_seconds >= 5 && var.flush_idle_seconds <= 300
+    error_message = "The idle flush interval must be between 5 and 300 seconds."
+  }
+}
+
+variable "flush_max_seconds" {
+  type    = number
+  default = 300
+
+  validation {
+    condition     = var.flush_max_seconds >= 300 && var.flush_max_seconds <= 3600
+    error_message = "The maximum flush interval must be between 300 and 3600 seconds."
   }
 }
 
@@ -57,7 +87,15 @@ variable "desired_count" {
 variable "allowed_origin" {
   type        = string
   description = "Browser origin allowed to call the API."
-  default     = "http://localhost:3050"
+  validation {
+    condition     = can(regex("^https://[A-Za-z0-9.-]+(:[0-9]+)?$", var.allowed_origin))
+    error_message = "Deployed anonymous sessions require an HTTPS origin without a path or trailing slash."
+  }
+}
+
+variable "acm_certificate_arn" {
+  type        = string
+  description = "Issued ACM certificate in this region, covering the application hostnames."
 }
 
 variable "route53_zone_id" {

@@ -1,8 +1,12 @@
 # Multi-region plan
 
-NotesOS starts as a single-region SaaS deployment in `ca-central-1`. That keeps
-the first release understandable while still leaving a clean path to a broader
-North America, Europe, and Asia footprint.
+The default deployment is one region, `ca-central-1`. Regional expansion
+requires reviewed modules and data-replication choices; the example is not a
+live six-region deployment.
+
+No region is provisioned by branch CI. ECS release actions are disabled and
+the future Argo CD job remains commented. Follow the
+[deployment checklist](DEPLOYMENT.md) before enabling any regional release.
 
 ## Target regions
 
@@ -13,22 +17,33 @@ North America, Europe, and Asia footprint.
 - Asia south/west: `ap-south-1`
 - Asia southeast/east: `ap-southeast-1`
 
-## Expansion model
+## Promotion path
 
-- Keep one regional Terraform stack per AWS region.
-- Keep ECR either replicated cross-region or built per region from GitHub Actions.
-- Put Route 53 latency routing, Route 53 geolocation routing, or AWS Global
-  Accelerator in front of regional ALBs.
-- Use one Route 53 routing policy per hostname. For example, use
-  `notes.example.com` for latency-based routing and `geo.notes.example.com` for
-  geolocation experiments.
-- Use one ALB per region with path-based routing: `/api/*` to the private API
-  service and all other paths to the public frontend service.
-- Use Aurora Global Database when the product needs multi-region recovery or
-  lower-latency reads.
-- Keep SSM parameters region-local so each ECS task reads secrets from its own region.
+Extract the regional Terraform stack into a module and instantiate it using
+provider aliases. Each region gets one path-routing ALB, frontend/API services,
+ElastiCache, gateway endpoint, regional SSM secrets, and logging.
 
-## EKS and Argo CD
+Use DynamoDB Global Tables when cross-region note replication is needed.
+Review the consistency mode and application conflict policy before enabling
+writes in several regions. The current revision scheme and Redis queue are
+regional; do not enable active-active writes without a revision/fencing design
+that remains correct across regions. A single write region is the first step.
 
-ECS is the initial runtime target. Argo CD is intentionally present only as a
-commented CD phase in CI until the EKS track is active.
+Device cookies need stable identity during failover. For one global workspace,
+replicate the same signing-key material securely into regional SSM parameters;
+separate keys intentionally produce different workspace identities. Redis
+credentials and buffers stay regional. Cloud failover can restore DynamoDB
+documents, but unflushed Redis changes are not a cross-region recovery guarantee.
+
+Use Route 53 latency routing for region selection. Use a different hostname
+for geolocation rules; the Terraform root supports both. Add a geolocation
+default record when opening service beyond the targeted continent. Each region
+must have an ACM certificate for its ALB hostnames.
+
+ECR image replication and the same API/frontend releases keep regions aligned.
+Set explicit data-residency and recovery targets before adding Europe or Asia.
+
+## EKS later
+
+ECS remains the initial runtime. Argo CD is commented in CI. When moving to EKS,
+use pod IAM roles for DynamoDB and SSM and retain private Redis networking.
