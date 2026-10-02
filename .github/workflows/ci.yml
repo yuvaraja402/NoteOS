@@ -173,6 +173,22 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: ${{ matrix.image.name }}:scan
+      - name: Check API container imports without AWS
+        if: ${{ matrix.image.name == 'noteos-api' }}
+        run: docker run --rm --entrypoint python noteos-api:scan -c "from app.main import app; print(app.title)"
+      - name: Check frontend container serves the preview
+        if: ${{ matrix.image.name == 'noteos-web' }}
+        run: |
+          docker run --detach --name noteos-web-smoke --publish 127.0.0.1:3050:3050 noteos-web:scan
+          trap 'docker rm --force noteos-web-smoke' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3050/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs noteos-web-smoke
+          exit 1
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

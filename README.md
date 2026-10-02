@@ -76,7 +76,7 @@ workspace; there is no cross-device recovery without an account.
 ## Checks and contributions
 
 Branch pushes and pull requests run lint, tests, Trivy, Terraform validation,
-and `linux/amd64` / `linux/arm64` image builds. Forks need no AWS credentials
+container smoke checks, and `linux/amd64` / `linux/arm64` image builds. Forks need no AWS credentials
 for these checks. Python tests use service doubles, not a local database.
 
 Snyk is opt-in: configure the read-only GitHub OIDC role and SSM SecureString,

@@ -22,6 +22,20 @@ python -m unittest discover -s tests
 Tests inject service doubles at the AWS boundary. They do not create cloud
 resources or start local database servers.
 
+## Dependencies
+
+`requirements.in` lists direct dependencies. `requirements.txt` locks their
+transitive dependencies and download hashes. After changing the input, use
+[uv](https://docs.astral.sh/uv/pip/compile/) to regenerate the lock:
+
+```bash
+uv pip compile --python-version 3.13 --universal --generate-hashes --output-file requirements.txt requirements.in
+uv pip compile --python-version 3.13 --universal --generate-hashes --constraint requirements.txt --output-file requirements-test.txt requirements-test.in
+```
+
+Run the tests and image scans after an update. Container builds download only
+verified wheels; the runtime image excludes package installers and compilers.
+
 ## Run with AWS
 
 The frontend preview works on its own. Start the API only after the AWS resources
