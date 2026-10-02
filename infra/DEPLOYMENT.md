@@ -32,7 +32,7 @@ CI's provider initialization downloads plugins, but creates no AWS resources.
 Production deployment is not yet verified in AWS. Passing local checks is not
 a production certification. Complete these gates for `ca-central-1`:
 
-- Review the branch through a pull request. Require passing checks and review on `main`.
+- Review the branch through a pull request. Install the [default-branch ruleset](../.github/rulesets/README.md), require passing `ci-gate`, and increase required approvals from the solo-maintainer default of zero to at least one independent reviewer before production.
 - Configure and enable Snyk; a skipped scan is not a completed security check.
 - Configure encrypted, access-controlled remote Terraform state and locking for both roots. State includes the Redis AUTH token.
 - Use a separate, least-privilege deployment identity. Do not reuse the Snyk SSM reader.
