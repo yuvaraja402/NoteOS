@@ -1,0 +1,15 @@
+project_name = "noteos"
+region       = "ca-central-1"
+environment  = "production"
+db_name      = "noteos"
+db_username  = "noteos"
+db_password_ssm_parameter_name = "/noteos/production/database/password"
+web_image    = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/noteos-web:latest"
+api_image    = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/noteos-api:latest"
+allowed_origin = "https://notes.example.com"
+
+# Optional Route 53 records. Leave blank for no DNS record.
+route53_zone_id      = ""
+app_domain_name      = ""
+geo_domain_name      = ""
+route53_continent_code = "NA"

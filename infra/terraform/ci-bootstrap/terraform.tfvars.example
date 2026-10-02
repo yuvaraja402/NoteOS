@@ -1,0 +1,7 @@
+github_repository             = "YOUR-OWNER/noteOS"
+region                        = "ca-central-1"
+github_branch                 = "main"
+name                          = "noteos-ci"
+snyk_token_ssm_parameter_name = "/noteos/ci/snyk-token"
+# Set this when the AWS account already has the GitHub OIDC provider.
+existing_oidc_provider_arn = ""

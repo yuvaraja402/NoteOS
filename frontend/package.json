@@ -1,0 +1,26 @@
+{
+  "name": "note-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NotesOS is a glassy Next.js notes workspace backed by a FastAPI notes service.",
+  "scripts": {
+    "dev": "next dev -p 3050",
+    "build": "next build",
+    "start": "next start -p 3050",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "lucide-react": "^1.49.0",
+    "next": "16.3.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "typescript": "^5"
+  }
+}
