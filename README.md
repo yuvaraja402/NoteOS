@@ -24,6 +24,7 @@ infra/
   scripts/             CI SSM secret loader and tests
   eks-later/           Future EKS notes and Buildx script
 .github/workflows/     Validation, Trivy, Snyk, multi-arch builds
+.github/rulesets/      Default-branch protection and fork setup
 docker-compose.yml     Frontend preview; optional AWS-backed API
 ```
 
@@ -85,6 +86,11 @@ then set the repository variable `ENABLE_SNYK=true`. It runs only on trusted
 scanner secrets stay in AWS SSM; never add them to GitHub or `.env` files.
 
 Use a feature branch for changes and open a pull request against `main`.
+The [default-branch ruleset](.github/rulesets/README.md) requires `ci-gate`,
+an up-to-date branch, and resolved review conversations; deletion and force
+pushes are blocked. Fork owners must install the included ruleset themselves.
+Mandatory approvals are disabled for solo development; require an independent
+reviewer before a production release.
 Keep state, credentials, real tfvars, and generated build files out of commits.
 Setup details and test commands live in each folder's README.
 

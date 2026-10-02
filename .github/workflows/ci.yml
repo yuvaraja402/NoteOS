@@ -216,6 +216,36 @@ jobs:
       - run: terraform init -backend=false
       - run: terraform validate
 
+  ci-gate:
+    # Keep this name stable: the default-branch ruleset requires this check.
+    if: ${{ always() }}
+    needs: [web, api, security, snyk, docker, terraform]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      JOB_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require every validation job to pass
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["JOB_RESULTS"])
+          failed = []
+          for job in ("web", "api", "security", "snyk", "docker", "terraform"):
+              result = results.get(job, {}).get("result", "missing")
+              # Snyk needs trusted main-only SSM access; PRs deliberately skip it.
+              allowed = {"success", "skipped"} if job == "snyk" else {"success"}
+              print(f"{job}: {result}")
+              if result not in allowed:
+                  failed.append(job)
+          if failed:
+              print(f"::error::Validation did not pass: {', '.join(failed)}")
+              sys.exit(1)
+          PY
+
   # ECS CD is intentionally not enabled. Keep apply, ECR publication, and ECS
   # service updates out of this validation workflow. See infra/DEPLOYMENT.md.
   # The future EKS example below must remain commented until separately reviewed.
