@@ -66,6 +66,8 @@ jobs:
         run: echo 'Snyk is disabled. Configure AWS OIDC and the SSM token, then set ENABLE_SNYK=true. Trivy remains enabled.'
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_INCLUDE_DEV_DEPS: "true"
         with:
           version: v0.75.0
           scan-type: fs
