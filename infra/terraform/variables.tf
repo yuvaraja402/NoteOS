@@ -1,3 +1,15 @@
+variable "aws_deployment_enabled" {
+  type        = bool
+  description = "Manual release opt-in only. Keep false for validation, branches, and forks."
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = var.aws_deployment_enabled
+    error_message = "AWS deployment is locked. Complete infra/DEPLOYMENT.md before explicitly enabling a reviewed release."
+  }
+}
+
 variable "project_name" {
   type    = string
   default = "noteos"

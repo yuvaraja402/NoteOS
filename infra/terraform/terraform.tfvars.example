@@ -1,5 +1,7 @@
 # Reference inputs only. Branch CI validates without applying this stack.
 # Configure and review a production release using ../DEPLOYMENT.md first.
+aws_deployment_enabled = false
+# Future approved release only: aws_deployment_enabled = true
 project_name = "noteos"
 region       = "ca-central-1"
 environment  = "production"

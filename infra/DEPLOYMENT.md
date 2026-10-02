@@ -11,7 +11,8 @@ These controls also apply after a merge to
 | Branch push / pull request | Lint, tests, Trivy, Terraform validation, multi-architecture builds |
 | Trusted `main` push | Same checks; Snyk runs only with `ENABLE_SNYK=true`, using a read-only OIDC role and SSM token |
 | Docker build jobs | `push: false`; no ECR login or registry publication |
-| Terraform jobs | Formatting, `init -backend=false`, and validation; no plan/apply against AWS |
+| Terraform jobs | Formatting, `init -backend=false`, validation and mocked deployment-lock tests; no plan/apply against AWS |
+| Terraform release opt-in | `aws_deployment_enabled=false` in both roots; normal planning/applying is rejected |
 | EKS Buildx helper | Local OCI archive only; publication disabled |
 | CD | ECS automation absent; future Argo CD job commented out |
 
@@ -22,10 +23,26 @@ no ECR write, ECS update, or Terraform provisioning permissions.
 Snyk is disabled by default for fresh forks; Trivy stays enabled. Set
 `ENABLE_SNYK=true` only after the OIDC role and SSM token are configured.
 
-Terraform resources are deliberately not commented out. Keep the complete
-single-region, three-tier stack in source; running `terraform apply` manually
-would still provision resources. Example inputs are not real account settings.
-CI's provider initialization downloads plugins, but creates no AWS resources.
+Terraform resource definitions remain intact and validateable. Both the app
+root and CI bootstrap reject normal planning/applying by default through
+`aws_deployment_enabled=false`. The AWS provider depends on that validated
+input, so AWS resource operations cannot proceed with the default lock.
+Example inputs explicitly retain `false`; release commands below are commented.
+CI's provider initialization downloads plugins but creates no AWS resources.
+
+The lock is an accidental-deployment guard, not an IAM security boundary.
+It does not revoke AWS credentials or invalidate a previously saved, unlocked
+plan. Do not keep release plans in the checkout or reuse them after approval
+is withdrawn. Resource definitions are not hidden behind `count = 0`: switching
+off an existing stack that way could destroy it. An existing deployment's
+maintenance or teardown needs its own reviewed, intentionally unlocked plan.
+
+Mock-provider tests prove that default, explicit `false` and targeted plans are
+rejected while locked, without AWS credentials, remote state, resource creation or secret
+reads. The runtime API can still write notes to already-provisioned Redis and
+DynamoDB when explicitly started with its cloud configuration; that is data
+access, not infrastructure deployment. Snyk's optional SSM read is also not
+provisioning. Neither the frontend preview nor CI starts the cloud API.
 
 ## Before a production release
 
@@ -36,6 +53,7 @@ a production certification. Complete these gates for `ca-central-1`:
 - Configure and enable Snyk; a skipped scan is not a completed security check.
 - Configure encrypted, access-controlled remote Terraform state and locking for both roots. State includes the Redis AUTH token.
 - Use a separate, least-privilege deployment identity. Do not reuse the Snyk SSM reader.
+- Keep `aws_deployment_enabled=false` in committed defaults and examples. Only override it for an explicitly approved bootstrap/release, after verifying the target account and secured state. Never enable it in this CI workflow.
 - Create the runtime KMS key, two SSM SecureStrings, an issued ACM certificate, and the DNS zone where applicable. Never commit secret values.
 - Bootstrap the ECR repositories before publishing the initial images. For a first installation only, review an ECR-only Terraform plan; the ECS stack requires images that already exist. Avoid routine targeted applies.
 - Build and scan both images for `linux/amd64` and `linux/arm64`. Publish immutable release tags; set `web_image` and `api_image` to reviewed image digests.
@@ -60,7 +78,7 @@ before adding CD. No automatic CD trigger is present today.
 # docker buildx build --platform linux/amd64,linux/arm64 --push -t "$WEB_IMAGE" ./frontend
 # docker buildx build --platform linux/amd64,linux/arm64 --push -t "$API_IMAGE" ./backend
 # Provisioning, from infra/terraform with real inputs and a secured backend:
-# terraform plan -out=release.tfplan
+# terraform plan -var='aws_deployment_enabled=true' -out=release.tfplan
 # terraform apply release.tfplan
 # Future EKS only; not used by the ECS release:
 # argocd app sync noteos --grpc-web

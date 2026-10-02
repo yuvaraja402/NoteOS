@@ -212,9 +212,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
-      - run: terraform fmt -check
+      - run: terraform fmt -check -recursive
       - run: terraform init -backend=false
       - run: terraform validate
+      - name: Verify deployment stays locked without AWS access
+        # Both test files use mock_provider and plan only; no real AWS plans/applies.
+        run: terraform test -filter=tests/deployment_lock.tftest.hcl -no-color
 
   ci-gate:
     # Keep this name stable: the default-branch ruleset requires this check.

@@ -9,6 +9,9 @@ targets a single-region, three-tier setup in `ca-central-1`.
 Nothing deploys on push or merge. CI tests, scans, and builds; it does not publish
 images, apply Terraform, or update ECS. Argo CD remains commented out. The
 Dockerfiles and infrastructure definitions are ready for a reviewed release.
+Both Terraform roots reject planning/applying by default through
+`aws_deployment_enabled=false`; example inputs keep that lock in place.
+Future release commands remain commented. No CI job enables this flag.
 
 The stack has not been deployed and verified in AWS. The
 [deployment checklist](infra/DEPLOYMENT.md) covers setup and launch checks.
